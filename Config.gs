@@ -33,7 +33,18 @@ const CONFIG = {
 
   MATCHING: {
     MINIMUM_CONFIDENCE: 0.80,
-    MINIMUM_COMPANY_SCORE: 0.75
+    MINIMUM_COMPANY_SCORE: 0.75,
+    /*
+     * Accept a best row below MINIMUM_CONFIDENCE when it clearly
+     * beats the runner-up and still clears CONFIDENCE_FLOOR.
+     */
+    CONFIDENCE_MARGIN: 0.15,
+    CONFIDENCE_FLOOR: 0.55,
+    /*
+     * Minimum compact-company length before space-insensitive
+     * matching is allowed (avoids short false positives).
+     */
+    MINIMUM_COMPACT_COMPANY_LENGTH: 6
   },
 
   GMAIL: {
@@ -44,6 +55,29 @@ const CONFIG = {
 
     MINIMUM_RECRUITING_SCORE: 2,
     MINIMUM_CANDIDATE_SCORE: 5,
+
+    /*
+     * Sender domains containing these tokens count as ATS / OA
+     * vendors (e.g. hackerrankforwork.com, cloud.oracle.com).
+     */
+    VENDOR_DOMAIN_TOKENS: [
+      "greenhouse",
+      "lever",
+      "ashby",
+      "workday",
+      "smartrecruiters",
+      "icims",
+      "jobvite",
+      "successfactors",
+      "oracle",
+      "brassring",
+      "hackerrank",
+      "codesignal",
+      "karat",
+      "hirevue",
+      "modernhire",
+      "rippling"
+    ],
 
     LABELS: {
       INTERNSHIPS: "Internships",

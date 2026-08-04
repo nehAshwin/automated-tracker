@@ -248,6 +248,55 @@ function calculateExactNormalizedMatch_(firstValue, secondValue) {
 }
 
 
+/**
+ * Space-insensitive company similarity for variants like
+ * "JP Morgan" vs "JPMorganChase".
+ */
+function calculateCompactCompanyMatch_(firstValue, secondValue) {
+  const first = compactNormalizedText_(
+    normalizeApplicationText_(firstValue)
+  );
+
+  const second = compactNormalizedText_(
+    normalizeApplicationText_(secondValue)
+  );
+
+  const minimumLength = Number(
+    CONFIG.MATCHING.MINIMUM_COMPACT_COMPANY_LENGTH
+  );
+
+  if (
+    !first
+    || !second
+    || first.length < minimumLength
+    || second.length < minimumLength
+  ) {
+    return 0;
+  }
+
+  if (first === second) {
+    return 1;
+  }
+
+  if (
+    companyCompactFormsAlign_(first, second)
+  ) {
+    return 0.92;
+  }
+
+  return 0;
+}
+
+
+function scoreCompanyMatch_(firstValue, secondValue) {
+  return Math.max(
+    calculateTokenSimilarity_(firstValue, secondValue),
+    calculateExactNormalizedMatch_(firstValue, secondValue),
+    calculateCompactCompanyMatch_(firstValue, secondValue)
+  );
+}
+
+
 function normalizeStatus_(status) {
   return String(status || "").trim().toLowerCase();
 }
@@ -295,15 +344,9 @@ function scoreApplicationMatch_(
   application,
   emailReceivedAt
 ) {
-  const companyScore = Math.max(
-    calculateTokenSimilarity_(
-      analysis.company,
-      application.company
-    ),
-    calculateExactNormalizedMatch_(
-      analysis.company,
-      application.company
-    )
+  const companyScore = scoreCompanyMatch_(
+    analysis.company,
+    application.company
   );
 
   const roleScore = calculateTokenSimilarity_(
@@ -395,15 +438,9 @@ function findBestApplicationMatch_(
 
   if (analysis.company) {
     eligibleApplications = activeApplications.filter(function (application) {
-      const companyScore = Math.max(
-        calculateTokenSimilarity_(
-          analysis.company,
-          application.company
-        ),
-        calculateExactNormalizedMatch_(
-          analysis.company,
-          application.company
-        )
+      const companyScore = scoreCompanyMatch_(
+        analysis.company,
+        application.company
       );
 
       return companyScore >= CONFIG.MATCHING.MINIMUM_COMPANY_SCORE;
@@ -503,21 +540,60 @@ function findBestApplicationMatch_(
   }
 
   const bestCandidate = scoredCandidates[0];
+  const secondBestCandidate = scoredCandidates[1];
 
   const minimumConfidence = Number(
     CONFIG.MATCHING.MINIMUM_CONFIDENCE
   );
 
-  const meetsMinimumConfidence =
+  const confidenceFloor = Number(
+    CONFIG.MATCHING.CONFIDENCE_FLOOR
+  );
+
+  const confidenceMargin = Number(
+    CONFIG.MATCHING.CONFIDENCE_MARGIN
+  );
+
+  const meetsAbsoluteConfidence =
     bestCandidate.matchConfidence
     >= minimumConfidence;
 
-  const reason = meetsMinimumConfidence
-    ? "Best active candidate passed the required confidence threshold."
-    : (
-        `Best candidate scored ${bestCandidate.matchConfidence}, `
-        + `below required ${minimumConfidence}.`
+  const runnerUpConfidence = secondBestCandidate
+    ? secondBestCandidate.matchConfidence
+    : 0;
+
+  const leadMargin =
+    bestCandidate.matchConfidence
+    - runnerUpConfidence;
+
+  const meetsMarginConfidence =
+    bestCandidate.matchConfidence >= confidenceFloor
+    && leadMargin >= confidenceMargin;
+
+  const meetsMinimumConfidence =
+    meetsAbsoluteConfidence
+    || meetsMarginConfidence;
+
+  let reason;
+
+  if (meetsAbsoluteConfidence) {
+    reason =
+      "Best active candidate passed the required confidence threshold.";
+  } else if (meetsMarginConfidence) {
+    reason =
+      `Best candidate scored ${bestCandidate.matchConfidence} `
+      + `with margin ${leadMargin.toFixed(4)} over the runner-up `
+      + `(floor ${confidenceFloor}, margin ${confidenceMargin}).`;
+  } else {
+    reason =
+      `Best candidate scored ${bestCandidate.matchConfidence}, `
+      + `below required ${minimumConfidence}`
+      + (
+        secondBestCandidate
+          ? ` and margin ${leadMargin.toFixed(4)} below required ${confidenceMargin}.`
+          : "."
       );
+  }
 
   return {
     matched: meetsMinimumConfidence,

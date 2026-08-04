@@ -246,6 +246,43 @@ function evaluateCandidateEmail_(
     - marketingPenalty;
 
   /*
+   * Assessment / ATS vendors that name an active employer in the
+   * subject or sender are treated as candidates even when body
+   * recruiting phrases are weak or oddly worded.
+   */
+  const vendorWithEmployerInHeader =
+    isKnownApplicantTrackingSender_(email.sender)
+    && (
+      companyMatch.location === "subject"
+      || companyMatch.location === "sender"
+    );
+
+  if (vendorWithEmployerInHeader) {
+    return {
+      isCandidate: true,
+      company: companyMatch.company,
+      companyLocation:
+        companyMatch.location,
+      companyScore: companyMatch.score,
+      recruitingScore:
+        Math.max(
+          recruitingResult.score,
+          CONFIG.GMAIL.MINIMUM_RECRUITING_SCORE
+        ),
+      marketingPenalty,
+      totalScore: Math.max(
+        totalScore,
+        CONFIG.GMAIL.MINIMUM_CANDIDATE_SCORE
+      ),
+      reason: [
+        `Matched active company "${companyMatch.company}" in the ${companyMatch.location}.`,
+        "Sender is an assessment or ATS vendor with the employer in the subject or sender.",
+        recruitingResult.reasons.join(" ")
+      ].filter(Boolean).join(" ")
+    };
+  }
+
+  /*
    * The email must have recruiting evidence independent
    * of the company match.
    */
@@ -362,6 +399,9 @@ function getActiveApplicationCompanyRecords_(
         {
           original: cleanedCompany,
           normalized,
+          compact: compactNormalizedText_(
+            normalized
+          ),
           tokens: normalized
             .split(" ")
             .filter(Boolean)
@@ -402,6 +442,143 @@ function normalizeCompanyForSearch_(
 }
 
 
+/**
+ * Removes spaces from an already-normalized company string so
+ * "jp morgan", "jpmorgan chase", and "jpmorganchase" can align.
+ */
+function compactNormalizedText_(value) {
+  return String(value || "")
+    .replace(/\s+/g, "")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+
+/**
+ * True when text contains the company as a spaced phrase or as a
+ * space-insensitive compact form built from consecutive tokens.
+ */
+function textContainsCompany_(
+  normalizedText,
+  companyRecord
+) {
+  if (
+    !normalizedText
+    || !companyRecord
+    || !companyRecord.normalized
+  ) {
+    return false;
+  }
+
+  if (
+    containsNormalizedPhrase_(
+      normalizedText,
+      companyRecord.normalized
+    )
+  ) {
+    return true;
+  }
+
+  return textContainsCompactCompany_(
+    normalizedText,
+    companyRecord.compact
+      || compactNormalizedText_(
+        companyRecord.normalized
+      )
+  );
+}
+
+
+function textContainsCompactCompany_(
+  normalizedText,
+  compactCompany
+) {
+  const minimumLength = Number(
+    CONFIG.MATCHING.MINIMUM_COMPACT_COMPANY_LENGTH
+  );
+
+  if (
+    !normalizedText
+    || !compactCompany
+    || compactCompany.length < minimumLength
+  ) {
+    return false;
+  }
+
+  const tokens = String(normalizedText)
+    .toLowerCase()
+    .split(/\s+/)
+    .map(function (token) {
+      return token.replace(/[^a-z0-9]/g, "");
+    })
+    .filter(Boolean);
+
+  for (let start = 0; start < tokens.length; start++) {
+    let built = "";
+
+    for (
+      let end = start;
+      end < tokens.length;
+      end++
+    ) {
+      built += tokens[end];
+
+      if (
+        companyCompactFormsAlign_(
+          compactCompany,
+          built
+        )
+      ) {
+        return true;
+      }
+
+      if (built.length > compactCompany.length + 8) {
+        break;
+      }
+    }
+  }
+
+  return false;
+}
+
+
+/**
+ * Aligns compact company forms such as "jpmorgan" with
+ * "jpmorganchase" when both sides are long enough.
+ */
+function companyCompactFormsAlign_(
+  firstCompact,
+  secondCompact
+) {
+  if (!firstCompact || !secondCompact) {
+    return false;
+  }
+
+  if (firstCompact === secondCompact) {
+    return true;
+  }
+
+  const minimumLength = Number(
+    CONFIG.MATCHING.MINIMUM_COMPACT_COMPANY_LENGTH
+  );
+
+  if (
+    firstCompact.length >= minimumLength
+    && secondCompact.startsWith(firstCompact)
+  ) {
+    return true;
+  }
+
+  if (
+    secondCompact.length >= minimumLength
+    && firstCompact.startsWith(secondCompact)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+
 /* ============================================================
  * COMPANY MATCHING
  * ============================================================
@@ -415,6 +592,8 @@ function normalizeCompanyForSearch_(
  * 3. Cleaned body near recruiting language
  *
  * A body match can never override a subject or sender match.
+ * Matching accepts spaced phrases and compact forms
+ * (e.g. "JP Morgan" vs "JPMorganChase").
  */
 function findBestCompanyMatch_(
   email,
@@ -455,9 +634,9 @@ function findBestCompanyMatch_(
      * in the subject.
      */
     if (
-      containsNormalizedPhrase_(
+      textContainsCompany_(
         subject,
-        normalizedCompany
+        companyRecord
       )
     ) {
       subjectMatches.push({
@@ -474,9 +653,9 @@ function findBestCompanyMatch_(
      * sender display name or email domain.
      */
     if (
-      containsNormalizedPhrase_(
+      textContainsCompany_(
         sender,
-        normalizedCompany
+        companyRecord
       )
     ) {
       senderMatches.push({
@@ -503,13 +682,14 @@ function findBestCompanyMatch_(
         normalizedCompany,
         companyRecord.tokens
       )
-      && containsNormalizedPhrase_(
+      && textContainsCompany_(
         body,
-        normalizedCompany
+        companyRecord
       )
       && isCompanyNearRecruitingLanguage_(
         body,
-        normalizedCompany
+        normalizedCompany,
+        companyRecord.compact
       )
     ) {
       bodyMatches.push({
@@ -748,7 +928,8 @@ function containsNormalizedPhrase_(
  */
 function isCompanyNearRecruitingLanguage_(
   body,
-  normalizedCompany
+  normalizedCompany,
+  compactCompany
 ) {
   const recruitingSignals = [
     "application",
@@ -765,8 +946,11 @@ function isCompanyNearRecruitingLanguage_(
     "offer"
   ];
 
-  let companyIndex =
-    body.indexOf(normalizedCompany);
+  const lowerBody = String(body || "").toLowerCase();
+
+  let companyIndex = normalizedCompany
+    ? lowerBody.indexOf(normalizedCompany)
+    : -1;
 
   while (companyIndex !== -1) {
     const windowStart = Math.max(
@@ -775,37 +959,52 @@ function isCompanyNearRecruitingLanguage_(
     );
 
     const windowEnd = Math.min(
-      body.length,
+      lowerBody.length,
       companyIndex
         + normalizedCompany.length
         + 180
     );
 
-    const nearbyText =
-      body.substring(
-        windowStart,
-        windowEnd
-      );
+    const nearbyText = lowerBody.substring(
+      windowStart,
+      windowEnd
+    );
 
-    const hasRecruitingSignal =
-      recruitingSignals.some(function (
-        signal
-      ) {
+    if (
+      recruitingSignals.some(function (signal) {
         return nearbyText.includes(signal);
-      });
-
-    if (hasRecruitingSignal) {
+      })
+    ) {
       return true;
     }
 
-    companyIndex = body.indexOf(
+    companyIndex = lowerBody.indexOf(
       normalizedCompany,
-      companyIndex
-        + normalizedCompany.length
+      companyIndex + normalizedCompany.length
     );
   }
 
-  return false;
+  /*
+   * Compact-only mentions (e.g. sheet "JP Morgan", body
+   * "JPMorganChase") do not have a spaced phrase index.
+   * Require recruiting language somewhere in the cleaned body.
+   */
+  const compact =
+    compactCompany
+    || compactNormalizedText_(normalizedCompany);
+
+  if (
+    !textContainsCompactCompany_(
+      lowerBody,
+      compact
+    )
+  ) {
+    return false;
+  }
+
+  return recruitingSignals.some(function (signal) {
+    return lowerBody.includes(signal);
+  });
 }
 
 
@@ -1104,34 +1303,25 @@ function calculateRecruitingSignalScore_(
 function isKnownApplicantTrackingSender_(
   sender
 ) {
-  const applicantTrackingDomains = [
-    "greenhouse.io",
-    "greenhouse-mail.io",
-    "lever.co",
-    "hire.lever.co",
-    "ashbyhq.com",
-    "workday.com",
-    "myworkdayjobs.com",
-    "myworkday.com",
-    "smartrecruiters.com",
-    "icims.com",
-    "jobvite.com",
-    "successfactors.com",
-    "oraclecloud.com",
-    "brassring.com",
-    "hackerrank.com",
-    "codesignal.com",
-    "karat.com",
-    "hirevue.com",
-    "modernhire.com",
-    "ats.rippling.com"
-  ];
+  const normalizedSender =
+    String(sender || "").toLowerCase();
 
-  return applicantTrackingDomains.some(
-    function (domain) {
-      return sender.includes(domain);
-    }
-  );
+  const domainMatch =
+    normalizedSender.match(
+      /@([a-z0-9.-]+\.[a-z]{2,})/
+    );
+
+  const domain = domainMatch
+    ? domainMatch[1]
+    : normalizedSender;
+
+  const vendorTokens =
+    CONFIG.GMAIL.VENDOR_DOMAIN_TOKENS
+    || [];
+
+  return vendorTokens.some(function (token) {
+    return domain.indexOf(token) !== -1;
+  });
 }
 
 
